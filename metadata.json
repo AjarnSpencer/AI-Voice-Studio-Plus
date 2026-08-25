@@ -1,0 +1,8 @@
+{
+  "name": "Text Narrator Polyglot Pro",
+  "description": "Professional AI audio production suite for long-form documentaries. Features a Universal Translation Layer and multi-engine synthesis across Gemini, ElevenLabs, and Resemble AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
