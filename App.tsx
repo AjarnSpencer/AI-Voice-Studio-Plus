@@ -1,12 +1,18 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, HarmBlockThreshold, HarmCategory } from '@google/genai';
-import { MicrophoneIcon, StopCircleIcon, UserIcon, SparklesIcon, PlusIcon, KeyIcon, BookOpenIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, InformationCircleIcon, TrashIcon } from './components/icons';
+import React, { useState, useEffect } from 'react';
+import { GoogleGenAI, Modality, HarmBlockThreshold, HarmCategory } from '@google/genai';
+import { 
+  SparklesIcon, 
+  KeyIcon, 
+  BookOpenIcon, 
+  ArrowDownTrayIcon, 
+  ArrowUpTrayIcon, 
+  InformationCircleIcon 
+} from './components/icons';
 import { CustomVoiceModal } from './components/CustomVoiceModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { PronunciationModal, type PronunciationRule } from './components/PronunciationModal';
 import { TutorialModal } from './components/TutorialModal';
-import { type TranscriptMessage } from './types';
-import { encode, decode, decodeAudioData, pcmToWavBlob, concatenateBuffers } from './utils/audio';
+import { decode, pcmToWavBlob, concatenateBuffers } from './utils/audio';
 
 declare global {
   interface AIStudio {
@@ -18,6 +24,8 @@ declare global {
     electronAPI?: {
       showInFolder: (path: string) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
+      saveFile: (options: any) => Promise<boolean>;
+      openFile: (options: any) => Promise<string | null>;
       platform: string;
     };
     aistudio?: AIStudio;
@@ -29,12 +37,6 @@ interface CustomVoice {
   name: string;
   instruction: string;
   baseVoice: string;
-}
-
-interface ExternalVoice {
-  id: string;
-  name: string;
-  provider: 'elevenlabs' | 'resemble';
 }
 
 const AppLogo = () => (
@@ -54,7 +56,7 @@ const AppLogo = () => (
   </div>
 );
 
-const splitTextIntoChunks = (text: string, maxChars: number = 1000): string[] => {
+const splitTextIntoChunks = (text: string, maxChars: number = 800): string[] => {
   if (text.length <= maxChars) return [text];
   const chunks: string[] = [];
   let currentPos = 0;
@@ -78,7 +80,6 @@ const splitTextIntoChunks = (text: string, maxChars: number = 1000): string[] =>
   return chunks;
 };
 
-type AppMode = 'conversation' | 'narration';
 type SvgProvider = 'gemini-tts' | 'elevenlabs' | 'resemble';
 
 const narrationPrebuiltVoices: { [key: string]: { description: string; voiceName: string, instruction?: string } } = {
@@ -113,9 +114,6 @@ Idha pana vitakka-vicārānaṃ vūpasamo sace hoti, cittaṃ ekodhibhāvaṃ p�
 </speak>`;
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<AppMode>('narration');
-  const [isSessionActive, setIsSessionActive] = useState<boolean>(false);
-  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedVoiceKey, setSelectedVoiceKey] = useState<string>('Sacred Text Reader');
   const [customVoices, setCustomVoices] = useState<CustomVoice[]>([]);
@@ -141,15 +139,6 @@ const App: React.FC = () => {
   const [pronunciationRules, setPronunciationRules] = useState<PronunciationRule[]>([]);
   const [isPronunciationModalOpen, setIsPronunciationModalOpen] = useState(false);
 
-  const sessionRef = useRef<any | null>(null);
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const nextStartTimeRef = useRef<number>(0);
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     const storedAmnesiac = localStorage.getItem('amnesiac_mode');
     const amnesiacStatus = storedAmnesiac === 'false' ? false : true;
@@ -165,84 +154,78 @@ const App: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => { transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [transcript]);
-
-  const exportVoices = () => {
-    const dataStr = JSON.stringify(customVoices, null, 2);
-    const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-    const link = document.createElement('a');
-    link.setAttribute('href', dataUri);
-    link.setAttribute('download', 'custom_voices.json');
-    link.click();
+  const handleExport = async (content: string, filename: string, type: string) => {
+    if (window.electronAPI?.saveFile) {
+      await window.electronAPI.saveFile({ content, defaultPath: filename });
+    } else {
+      const dataUri = `data:${type};charset=utf-8,` + encodeURIComponent(content);
+      const link = document.createElement('a');
+      link.setAttribute('href', dataUri);
+      link.setAttribute('download', filename);
+      link.click();
+    }
   };
 
-  const importVoices = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json';
-    input.onchange = (e: any) => {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onload = (event: any) => {
-        try {
-          const imported = JSON.parse(event.target.result);
-          if (Array.isArray(imported)) {
-            const updated = [...customVoices, ...imported.filter(v => !customVoices.find(cv => cv.id === v.id))];
-            setCustomVoices(updated);
-            localStorage.setItem('custom_voice_profiles', JSON.stringify(updated));
-          }
-        } catch (err) { setError("Import failed: Invalid JSON"); }
-      };
-      reader.readAsText(file);
-    };
-    input.click();
+  const handleImport = async (accept: string): Promise<string | null> => {
+    if (window.electronAPI?.openFile) {
+      const ext = accept === 'application/json' ? ['json'] : ['txt'];
+      return await window.electronAPI.openFile({ filters: [{ name: 'File', extensions: ext }] });
+    } else {
+      return new Promise((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = accept;
+        input.onchange = (e: any) => {
+          const file = e.target.files[0];
+          if (!file) return resolve(null);
+          const reader = new FileReader();
+          reader.onload = (event: any) => resolve(event.target.result as string);
+          reader.readAsText(file);
+        };
+        input.click();
+      });
+    }
+  };
+
+  const exportVoices = () => {
+    handleExport(JSON.stringify(customVoices, null, 2), 'custom_voices.json', 'application/json');
+  };
+
+  const importVoices = async () => {
+    try {
+      const content = await handleImport('application/json');
+      if (!content) return;
+      const imported = JSON.parse(content);
+      if (Array.isArray(imported)) {
+        const updated = [...customVoices, ...imported.filter(v => !customVoices.find(cv => cv.id === v.id))];
+        setCustomVoices(updated);
+        localStorage.setItem('custom_voice_profiles', JSON.stringify(updated));
+      }
+    } catch (err) { setError("Import failed: Invalid JSON"); }
   };
 
   const exportScript = () => {
-    const dataUri = 'data:text/plain;charset=utf-8,' + encodeURIComponent(narrationText);
-    const link = document.createElement('a');
-    link.setAttribute('href', dataUri);
-    link.setAttribute('download', 'narrative_script.txt');
-    link.click();
+    handleExport(narrationText, 'narrative_script.txt', 'text/plain');
   };
 
-  const importScript = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'text/plain';
-    input.onchange = (e: any) => {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onload = (event: any) => { setNarrationText(event.target.result as string); };
-      reader.readAsText(file);
-    };
-    input.click();
+  const importScript = async () => {
+    const content = await handleImport('text/plain');
+    if (content) setNarrationText(content);
   };
 
   const exportStyling = () => {
     if (!voiceStyle) return;
-    const dataUri = 'data:text/plain;charset=utf-8,' + encodeURIComponent(voiceStyle);
-    const link = document.createElement('a');
-    link.setAttribute('href', dataUri);
-    link.setAttribute('download', 'vocal_style_directive.txt');
-    link.click();
+    handleExport(voiceStyle, 'vocal_style_directive.txt', 'text/plain');
   };
 
-  const importStyling = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'text/plain';
-    input.onchange = (e: any) => {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onload = (event: any) => { setVoiceStyle(event.target.result as string); };
-      reader.readAsText(file);
-    };
-    input.click();
+  const importStyling = async () => {
+    const content = await handleImport('text/plain');
+    if (content) setVoiceStyle(content);
   };
 
   const handleSaveApiKey = (google: string, resemble: string, resembleId: string, eleven: string, amnesiac: boolean) => {
-    setIsAmnesiac(amnesiac); localStorage.setItem('amnesiac_mode', amnesiac ? 'true' : 'false');
+    setIsAmnesiac(amnesiac); 
+    localStorage.setItem('amnesiac_mode', amnesiac ? 'true' : 'false');
     if (google) setGeminiApiKey(google);
     if (!amnesiac) {
       if(google) localStorage.setItem('gemini_api_key', google);
@@ -250,12 +233,21 @@ const App: React.FC = () => {
       if(resembleId) localStorage.setItem('resemble_project_id', resembleId);
       if(eleven) localStorage.setItem('elevenlabs_api_key', eleven);
     }
-    setResembleKey(resemble); setResembleProjectId(resembleId); setElevenLabsKey(eleven);
+    setResembleKey(resemble); 
+    setResembleProjectId(resembleId); 
+    setElevenLabsKey(eleven);
   };
 
   const shredVault = () => {
-    localStorage.clear(); sessionStorage.clear();
-    setGeminiApiKey(''); setResembleKey(''); setResembleProjectId(''); setElevenLabsKey(''); setIsAmnesiac(true); setCustomVoices([]); setPronunciationRules([]);
+    localStorage.clear(); 
+    sessionStorage.clear();
+    setGeminiApiKey(''); 
+    setResembleKey(''); 
+    setResembleProjectId(''); 
+    setElevenLabsKey(''); 
+    setIsAmnesiac(true); 
+    setCustomVoices([]); 
+    setPronunciationRules([]);
     window.location.reload();
   };
 
@@ -268,7 +260,6 @@ const App: React.FC = () => {
       console.warn("localStorage access denied");
     }
     
-    // Safety check for process and process.env
     if (typeof process !== 'undefined' && process.env) {
       if (process.env.API_KEY) return process.env.API_KEY;
       if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
@@ -284,7 +275,7 @@ const App: React.FC = () => {
          if (!hasKey) { 
            console.log("No API key selected in AI Studio, opening selector...");
            await window.aistudio.openSelectKey(); 
-           return false; // Stop current execution so user can select key
+           return false;
          }
          return true;
       }
@@ -304,73 +295,6 @@ const App: React.FC = () => {
       }
       return true;
     }
-  };
-
-  const stopSession = useCallback(() => {
-    if (sessionRef.current) { sessionRef.current.close(); sessionRef.current = null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach((track) => track.stop()); streamRef.current = null; }
-    if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
-    if (inputAudioContextRef.current) { inputAudioContextRef.current.close(); inputAudioContextRef.current = null; }
-    if (outputAudioContextRef.current) { sourcesRef.current.forEach(s => s.stop()); sourcesRef.current.clear(); outputAudioContextRef.current.close(); outputAudioContextRef.current = null; }
-    setIsSessionActive(false);
-  }, []);
-
-  const startSession = async () => {
-    if (!await ensureApiKey()) return;
-    setError(null); setIsSessionActive(true);
-    try {
-      const apiKey = getEffectiveApiKey();
-      const ai = new GoogleGenAI({ apiKey });
-      const customProfile = customVoices.find(v => v.id === selectedVoiceKey);
-      const voiceInstruction = customProfile ? customProfile.instruction : (narrationPrebuiltVoices[selectedVoiceKey]?.instruction || "");
-      const baseVoiceName = customProfile ? customProfile.baseVoice : (narrationPrebuiltVoices[selectedVoiceKey]?.voiceName || 'Charon');
-      const systemInstruction = `You are a professional documentary narrator. Identity Tone: ${voiceInstruction}. Focus on technical accuracy and dramatic gravity.`;
-      
-      inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      nextStartTimeRef.current = 0;
-
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.0-flash-exp',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: baseVoiceName } } },
-          systemInstruction: `${systemInstruction}\n\nNote: You support advanced neural delivery. You can interpret tags like [whispers], [laughs], [fast], [excited] if they appear in text (though in Live mode, you generate them natively based on tone).`,
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: async () => {
-            streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const source = inputAudioContextRef.current!.createMediaStreamSource(streamRef.current);
-            scriptProcessorRef.current = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
-            scriptProcessorRef.current.onaudioprocess = (e) => {
-              const input = e.inputBuffer.getChannelData(0);
-              const audioData = { data: encode(new Uint8Array(new Int16Array(input.map(f => f * 32768)).buffer)), mimeType: 'audio/pcm;rate=16000' };
-              sessionPromise.then(s => s.sendRealtimeInput({ audio: audioData }));
-            };
-            source.connect(scriptProcessorRef.current);
-            scriptProcessorRef.current.connect(inputAudioContextRef.current!.destination);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio) {
-              const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioContextRef.current!, 24000, 1);
-              const s = outputAudioContextRef.current!.createBufferSource();
-              s.buffer = audioBuffer;
-              s.connect(outputAudioContextRef.current!.destination);
-              const startTime = Math.max(outputAudioContextRef.current!.currentTime, nextStartTimeRef.current);
-              s.start(startTime);
-              nextStartTimeRef.current = startTime + audioBuffer.duration;
-              sourcesRef.current.add(s);
-            }
-          },
-          onerror: (err: any) => { setError(`Engine Exception: ${err.message}`); stopSession(); },
-          onclose: () => stopSession(),
-        },
-      });
-      sessionRef.current = await sessionPromise;
-    } catch (err: any) { setError(err.message); setIsSessionActive(false); }
   };
 
   const generateNarration = async () => {
@@ -395,7 +319,6 @@ const App: React.FC = () => {
       pronunciationRules.forEach(r => script = script.replace(new RegExp(`\\b${r.word}\\b`, 'gi'), r.alias));
 
       const isSsmlInput = script.includes('<speak>');
-      // Use smaller chunks for dense diacritic text to prevent safety blocks and timeouts
       const chunks = splitTextIntoChunks(script, 800); 
       const audioParts: Uint8Array[] = [];
 
@@ -632,7 +555,7 @@ const App: React.FC = () => {
   const renderGeminiVoiceSelector = () => (
     <div className="flex flex-col gap-2">
       <div className="flex justify-between items-center mb-1">
-        <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Text Narrator Polyglot Pro (Gemini Only)</label>
+        <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Voice Selection &amp; Blueprints</label>
         <div className="flex gap-2">
            <button onClick={exportVoices} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Profiles</button>
            <button onClick={importVoices} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Profiles</button>
@@ -651,7 +574,7 @@ const App: React.FC = () => {
         </select>
         <button onClick={() => setIsCustomVoiceModalOpen(true)} className="px-4 bg-teal-600/20 border border-teal-500/40 rounded-lg text-teal-400 hover:bg-teal-600/30 flex items-center gap-2 transition-all">
           <SparklesIcon className="w-4 h-4" />
-          <span className="text-[8px] font-black uppercase tracking-tighter">Polyglot Pro</span>
+          <span className="text-[8px] font-black uppercase tracking-tighter">New Voice</span>
         </button>
       </div>
     </div>
@@ -659,117 +582,143 @@ const App: React.FC = () => {
 
   return (
     <main className="fixed inset-0 bg-gray-900 text-white flex flex-col font-sans overflow-x-hidden overflow-y-auto">
+      {/* Header */}
       <header className="sticky top-0 left-0 right-0 bg-gray-800/95 backdrop-blur-md border-b border-gray-700 p-3 flex flex-col items-center gap-2 shrink-0 shadow-2xl z-[100] transition-all">
-        <div className="flex items-center gap-3 w-full max-w-4xl justify-center">
-          <AppLogo />
-          <div className="flex flex-col">
-            <h1 className="text-xl sm:text-2xl font-bold text-cyan-300 font-orbitron tracking-tighter text-center leading-none">Text Narrator Polyglot Pro</h1>
-            <div className="mt-1 text-center hidden sm:block">
-              <span className="text-[7px] bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded border border-teal-500/20 font-black uppercase tracking-[0.2em]">Professional AI Narrative Suite</span>
+        <div className="flex items-center gap-3 w-full max-w-5xl justify-between px-2">
+          <div className="flex items-center gap-3">
+            <AppLogo />
+            <div className="flex flex-col text-left">
+              <h1 className="text-xl sm:text-2xl font-bold text-cyan-300 font-orbitron tracking-tighter leading-none">Text Narrator Polyglot Pro</h1>
+              <div className="mt-1 hidden sm:block">
+                <span className="text-[7px] bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded border border-teal-500/20 font-black uppercase tracking-[0.2em]">Professional AI Narrative Suite</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div className="w-full flex justify-between items-center max-w-lg px-2">
-            <div className="flex items-center gap-4">
-              <button onClick={() => setIsTutorialModalOpen(true)} className="text-gray-400 hover:text-teal-300 transition-colors"><InformationCircleIcon className="w-6 h-6" /></button>
-              <button onClick={() => setIsPronunciationModalOpen(true)} className="text-gray-400 hover:text-teal-300 transition-colors"><BookOpenIcon className="w-6 h-6" /></button>
-            </div>
-            <div className="inline-flex bg-gray-900 border border-gray-700 rounded-lg p-1">
-                <button onClick={() => setMode('conversation')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${mode === 'conversation' ? 'bg-teal-600' : 'text-gray-400'}`}>Live Chat</button>
-                <button onClick={() => setMode('narration')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${mode === 'narration' ? 'bg-teal-600' : 'text-gray-400'}`}>Studio</button>
-            </div>
-             <button onClick={() => setIsApiKeyModalOpen(true)} className="text-gray-400 hover:text-teal-300 transition-colors"><KeyIcon className="w-6 h-6" /></button>
+          
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setIsTutorialModalOpen(true)} 
+              title="Academy & Prompting Guide"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 border border-gray-700 hover:border-teal-500/50 rounded-lg text-gray-400 hover:text-teal-300 transition-colors text-xs font-bold uppercase tracking-wider"
+            >
+              <InformationCircleIcon className="w-4 h-4" />
+              <span className="hidden md:inline">Academy</span>
+            </button>
+            <button 
+              onClick={() => setIsPronunciationModalOpen(true)} 
+              title="Pronunciation & Diacritics Lexicon"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 border border-gray-700 hover:border-teal-500/50 rounded-lg text-gray-400 hover:text-teal-300 transition-colors text-xs font-bold uppercase tracking-wider"
+            >
+              <BookOpenIcon className="w-4 h-4" />
+              <span className="hidden md:inline">Lexicon</span>
+            </button>
+            <button 
+              onClick={() => setIsApiKeyModalOpen(true)} 
+              title="API Key Vault & Security"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 border border-gray-700 hover:border-teal-500/50 rounded-lg text-gray-400 hover:text-teal-300 transition-colors text-xs font-bold uppercase tracking-wider"
+            >
+              <KeyIcon className="w-4 h-4" />
+              <span className="hidden md:inline">Keys</span>
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="flex-grow flex flex-col relative pt-6 pb-8 px-4 sm:px-6 w-full mx-auto">
-        {mode === 'conversation' ? (
-          <div className="flex-grow w-full max-w-4xl mx-auto flex flex-col p-4 relative min-h-[calc(100vh-10rem)]">
-            <div className="bg-gray-800/50 p-4 rounded-2xl border border-gray-700/50 mb-4 shrink-0">
-               {renderGeminiVoiceSelector()}
-            </div>
-            <div className="flex-grow space-y-4 pb-32 mb-20 px-2">
-              {transcript.map((msg, i) => (
-                <div key={i} className={`flex items-start gap-4 ${msg.speaker === 'user' ? 'justify-end' : ''}`}>
-                  <div className={`p-4 rounded-2xl max-w-[85%] border shadow-xl ${msg.speaker === 'model' ? 'bg-gray-800 border-gray-700 text-teal-50' : 'bg-teal-900/40 border-teal-500/30 text-teal-100'}`}>
-                    <p className="text-sm leading-relaxed font-medium whitespace-pre-wrap">{msg.text || 'Syncing...'}</p>
-                  </div>
-                </div>
-              ))}
-              <div ref={transcriptEndRef} />
-            </div>
-            <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg flex items-center gap-4 px-4 z-20">
-              <button onClick={() => setTranscript([])} className="p-4 bg-gray-900 border border-gray-700 rounded-2xl hover:bg-gray-800 text-gray-500 transition-all"><TrashIcon className="w-5 h-5" /></button>
-              <button onClick={isSessionActive ? stopSession : startSession} className={`flex-grow py-5 rounded-3xl font-black uppercase text-xs tracking-[0.2em] border shadow-2xl transition-all ${isSessionActive ? 'bg-red-600 border-red-400' : 'bg-teal-600 border-teal-400'}`}>
-                {isSessionActive ? 'Terminate Link' : 'Initialize Sync'}
-              </button>
-            </div>
+      {/* Main Studio Body */}
+      <div className="flex-grow flex flex-col relative pt-4 pb-8 px-4 sm:px-6 w-full max-w-5xl mx-auto">
+        <div className="flex-grow w-full flex flex-col gap-4">
+          
+          {/* Controls Bar */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-gray-800/40 p-5 rounded-3xl border border-gray-700/50">
+              <div>
+                  <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Pipeline Engine</label>
+                  <select value={narrationProvider} onChange={(e) => setNarrationProvider(e.target.value as SvgProvider)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
+                    <option value="gemini-tts">Gemini Neural TTS (v3.1 Preview)</option>
+                    <option value="elevenlabs">ElevenLabs Studio</option>
+                    <option value="resemble">Resemble AI</option>
+                  </select>
+              </div>
+              <div>
+                  <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Language Registry</label>
+                  <select value={narrationLanguage} onChange={(e) => setNarrationLanguage(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
+                      {LANGUAGES.map(lang => <option key={lang} value={lang}>{lang}</option>)}
+                  </select>
+              </div>
+              <div className="md:col-span-2">
+                {renderGeminiVoiceSelector()}
+              </div>
           </div>
-        ) : (
-          <div className="flex-grow w-full max-w-5xl mx-auto p-4 flex flex-col gap-4">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-gray-800/40 p-5 rounded-3xl border border-gray-700/50">
-                <div>
-                    <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Pipeline</label>
-                    <select value={narrationProvider} onChange={(e) => setNarrationProvider(e.target.value as SvgProvider)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
-                      <option value="gemini-tts">Gemini Neural TTS</option>
-                      <option value="elevenlabs">ElevenLabs Studio</option>
-                      <option value="resemble">Resemble AI</option>
-                    </select>
-                </div>
-                <div>
-                    <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Language Registry</label>
-                    <select value={narrationLanguage} onChange={(e) => setNarrationLanguage(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
-                        {LANGUAGES.map(lang => <option key={lang} value={lang}>{lang}</option>)}
-                    </select>
-                </div>
-                <div className="md:col-span-2">
-                  {renderGeminiVoiceSelector()}
-                </div>
-            </div>
-            
-            <div className="bg-gray-800/30 p-3 rounded-xl border border-gray-700/50">
-               <div className="flex justify-between items-center mb-1">
-                 <label className="block text-[9px] font-black text-teal-400 uppercase tracking-widest">Neural Styling / Direction (Override Engine)</label>
-                 <div className="flex gap-2">
-                    <button onClick={exportStyling} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Style</button>
-                    <button onClick={importStyling} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Style</button>
-                 </div>
+          
+          {/* Direction / Vocal Style */}
+          <div className="bg-gray-800/30 p-3 rounded-xl border border-gray-700/50">
+             <div className="flex justify-between items-center mb-1">
+               <label className="block text-[9px] font-black text-teal-400 uppercase tracking-widest">Neural Styling / Direction (Override Engine)</label>
+               <div className="flex gap-2">
+                  <button onClick={exportStyling} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Style</button>
+                  <button onClick={importStyling} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Style</button>
                </div>
-               <input type="text" value={voiceStyle} onChange={(e) => setVoiceStyle(e.target.value)} placeholder="e.g. Deep Baritone, Slow Meditative, Brahmanic Pronunciation, British Accent" className="w-full bg-gray-900 border border-gray-700 rounded-md p-2 text-white text-xs outline-none focus:border-teal-500/50" />
-            </div>
-
-            <div className="flex flex-col flex-grow min-h-[300px]">
-                 <div className="flex justify-between items-center mb-2">
-                    <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Narrative Manuscript (Prosody Stack Active)</label>
-                    <div className="flex gap-3">
-                       <button onClick={exportScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Script</button>
-                       <button onClick={importScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Script</button>
-                    </div>
-                 </div>
-                 <textarea value={narrationText} onChange={(e) => setNarrationText(e.target.value)} className="w-full min-h-[300px] bg-gray-800 border border-gray-700 rounded-3xl p-6 text-white font-mono text-xs leading-relaxed shadow-2xl outline-none resize-y" disabled={isGenerating} />
-            </div>
-            
-            <div className="flex justify-center my-4">
-                 <button onClick={generateNarration} disabled={isGenerating || !narrationText} className="px-20 py-5 rounded-full bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed font-black uppercase text-[11px] tracking-[0.2em] border border-teal-400/40 shadow-2xl transition-all">
-                    {isGenerating ? generationStatus : "Execute Production Pipeline"}
-                </button>
-            </div>
-            
-            {audioUrl && (
-                <div className="mb-6 p-6 bg-gray-800 rounded-3xl border border-teal-500/20 shadow-2xl flex flex-col gap-4">
-                    <div className="flex justify-between text-[9px] font-black uppercase text-teal-500 tracking-widest"><span>Master Production Ready</span><span>24kHz PCM</span></div>
-                    <audio controls src={audioUrl} className="w-full rounded-full bg-gray-900 border border-gray-700"></audio>
-                    <a href={audioUrl} download={`master-${Date.now()}.wav`} className="block text-center px-4 py-4 rounded-2xl bg-teal-500 hover:bg-teal-600 font-black uppercase text-xs tracking-widest transition-all">Download Master Production</a>
-                </div>
-            )}
+             </div>
+             <input type="text" value={voiceStyle} onChange={(e) => setVoiceStyle(e.target.value)} placeholder="e.g. Deep Baritone, Slow Meditative, Brahmanic Pronunciation, British Accent" className="w-full bg-gray-900 border border-gray-700 rounded-md p-2 text-white text-xs outline-none focus:border-teal-500/50" />
           </div>
-        )}
+
+          {/* Narrative Script Area */}
+          <div className="flex flex-col flex-grow min-h-[300px]">
+               <div className="flex justify-between items-center mb-2">
+                  <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Narrative Manuscript (Prosody Stack Active)</label>
+                  <div className="flex gap-3">
+                     <button onClick={exportScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Script</button>
+                     <button onClick={importScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Script</button>
+                  </div>
+               </div>
+               <textarea value={narrationText} onChange={(e) => setNarrationText(e.target.value)} className="w-full min-h-[300px] bg-gray-800 border border-gray-700 rounded-3xl p-6 text-white font-mono text-xs leading-relaxed shadow-2xl outline-none resize-y focus:border-teal-500/50 transition-all" disabled={isGenerating} />
+          </div>
+          
+          {/* Action Trigger */}
+          <div className="flex justify-center my-4">
+               <button onClick={generateNarration} disabled={isGenerating || !narrationText} className="px-20 py-5 rounded-full bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed font-black uppercase text-[11px] tracking-[0.2em] border border-teal-400/40 shadow-2xl transition-all hover:scale-[1.02] active:scale-[0.98]">
+                  {isGenerating ? generationStatus : "Execute Production Pipeline"}
+              </button>
+          </div>
+          
+          {/* Audio Output */}
+          {audioUrl && (
+              <div className="mb-6 p-6 bg-gray-800 rounded-3xl border border-teal-500/20 shadow-2xl flex flex-col gap-4 animate-in fade-in duration-300">
+                  <div className="flex justify-between text-[9px] font-black uppercase text-teal-500 tracking-widest">
+                    <span>Master Production Ready</span>
+                    <span>24kHz PCM WAV</span>
+                  </div>
+                  <audio controls src={audioUrl} className="w-full rounded-full bg-gray-900 border border-gray-700"></audio>
+                  <button onClick={async () => {
+                    if (window.electronAPI?.saveFile && audioUrl) {
+                      try {
+                        const response = await fetch(audioUrl);
+                        const buffer = await response.arrayBuffer();
+                        const base64 = btoa(new Uint8Array(buffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
+                        await window.electronAPI.saveFile({ 
+                          content: base64, 
+                          defaultPath: `master-narrator-${Date.now()}.wav`,
+                          isBase64: true 
+                        });
+                      } catch (err) { console.error("Failed to save audio", err); }
+                    } else if (audioUrl) {
+                      const link = document.createElement('a');
+                      link.href = audioUrl;
+                      link.download = `master-narrator-${Date.now()}.wav`;
+                      link.click();
+                    }
+                  }} className="block w-full text-center px-4 py-4 rounded-2xl bg-teal-500 hover:bg-teal-600 text-white font-black uppercase text-xs tracking-widest transition-all shadow-lg hover:shadow-teal-500/20">
+                    Download Master Production (.wav)
+                  </button>
+              </div>
+          )}
+        </div>
       </div>
 
+      {/* Footer */}
       <footer className="bg-gray-800 border-t border-gray-700 p-4 flex flex-col items-center px-4 sm:px-6 shrink-0 text-[10px] sm:text-xs font-black text-gray-400 uppercase tracking-widest gap-4 relative z-10">
         <div className="flex flex-col lg:flex-row justify-between w-full items-center gap-6 lg:gap-4">
           <div className="flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left">
-            <span>System v1.6.1 • Production Architecture Active</span>
+            <span>System v1.7.0 • Production Architecture Active</span>
             <span className="hidden sm:inline opacity-30">|</span>
             <span>© 2025 Text Narrator Polyglot Pro Master Suite</span>
           </div>
@@ -787,6 +736,7 @@ const App: React.FC = () => {
         </div>
       </footer>
 
+      {/* Alert Overlay */}
       {error && (
         <div className="fixed bottom-8 right-8 bg-red-950/95 border border-red-500 text-red-100 p-5 rounded-3xl shadow-2xl max-w-sm z-[300]">
           <p className="text-[10px] font-black uppercase mb-2 tracking-widest text-red-400 font-orbitron">Engine Alert</p>
@@ -794,14 +744,21 @@ const App: React.FC = () => {
           <button onClick={() => setError(null)} className="absolute top-4 right-4 text-red-400 text-xl hover:text-white transition-all">&times;</button>
         </div>
       )}
-      <CustomVoiceModal apiKey={getEffectiveApiKey()} isOpen={isCustomVoiceModalOpen} onClose={() => setIsCustomVoiceModalOpen(false)} onSave={(v) => {  
-        const newVoice: CustomVoice = { ...v, id: `custom-${Date.now()}` };
-        const updated = [...customVoices, newVoice];
-        setCustomVoices(updated);
-        localStorage.setItem('custom_voice_profiles', JSON.stringify(updated));
-        setSelectedVoiceKey(newVoice.id);
-        setIsCustomVoiceModalOpen(false);
-      }} />
+
+      {/* Modals */}
+      <CustomVoiceModal 
+        apiKey={getEffectiveApiKey()} 
+        isOpen={isCustomVoiceModalOpen} 
+        onClose={() => setIsCustomVoiceModalOpen(false)} 
+        onSave={(v) => {  
+          const newVoice: CustomVoice = { ...v, id: `custom-${Date.now()}` };
+          const updated = [...customVoices, newVoice];
+          setCustomVoices(updated);
+          localStorage.setItem('custom_voice_profiles', JSON.stringify(updated));
+          setSelectedVoiceKey(newVoice.id);
+          setIsCustomVoiceModalOpen(false);
+        }} 
+      />
       <ApiKeyModal 
         isOpen={isApiKeyModalOpen} 
         onClose={() => setIsApiKeyModalOpen(false)} 
@@ -812,8 +769,19 @@ const App: React.FC = () => {
         initialElevenLabsKey={elevenLabsKey}
         initialAmnesiac={isAmnesiac}
       />
-      <PronunciationModal isOpen={isPronunciationModalOpen} onClose={() => setIsPronunciationModalOpen(false)} rules={pronunciationRules} onSave={(r) => { setPronunciationRules(r); localStorage.setItem('pronunciation_rules', JSON.stringify(r)); }} />
-      <TutorialModal isOpen={isTutorialModalOpen} onClose={() => setIsTutorialModalOpen(false)} />
+      <PronunciationModal 
+        isOpen={isPronunciationModalOpen} 
+        onClose={() => setIsPronunciationModalOpen(false)} 
+        rules={pronunciationRules} 
+        onSave={(r) => { 
+          setPronunciationRules(r); 
+          localStorage.setItem('pronunciation_rules', JSON.stringify(r)); 
+        }} 
+      />
+      <TutorialModal 
+        isOpen={isTutorialModalOpen} 
+        onClose={() => setIsTutorialModalOpen(false)} 
+      />
     </main>
   );
 };

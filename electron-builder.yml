@@ -1,7 +1,6 @@
-
-appId: com.ajarnspencer.text2speechpolyglotnarrator
-productName: Text 2 Speech Polyglot Narrator
-copyright: Copyright © 2025 Ajarn Spencer Littlewood
+appId: com.ajarnspencer.textnarratorpolyglotpro
+productName: Text Narrator Polyglot Pro
+copyright: Copyright © 2026 Ajarn Spencer Littlewood
 
 directories:
   output: release
@@ -9,84 +8,52 @@ directories:
 
 files:
   - dist/**/*
-  - electron.js
-  - preload.js
+  - electron.cjs
+  - preload.cjs
   - package.json
 
 fileAssociations:
   - ext: aivoice
-    name: Text 2 Speech Polyglot Narrator Profile
+    name: Polyglot Pro Profile
     description: Professional Vocal Identity Profile
     role: Editor
   - ext: vscript
-    name: Text 2 Speech Polyglot Narrator Script
+    name: Polyglot Pro Script
     description: SSML Narrator Script
     role: Editor
 
-# Windows Configuration (Microsoft Store)
+# Windows Configuration
 win:
   publisherName: Ajarn Spencer Littlewood
   target:
     - target: nsis
       arch: [x64]
-    - target: appx 
   icon: assets/icon.ico
-  legalCopyright: Copyright © 2025 Ajarn Spencer Littlewood
+  legalCopyright: Copyright © 2026 Ajarn Spencer Littlewood
 
-appx:
-  identityName: AjarnSpencer.Text2SpeechPolyglotNarrator
-  publisher: "CN=Ajarn Spencer Littlewood"
-  publisherDisplayName: Ajarn Spencer Littlewood
-  displayName: Text 2 Speech Polyglot Narrator
-  languages: [en-US]
-
-# Mac Configuration (Apple App Store / MAS)
+# Mac Configuration
 mac:
   target:
     - dmg
-    - pkg
-    - mas # Essential for Mac App Store
+    - zip
   category: public.app-category.video
   icon: assets/icon.icns
-  bundleVersion: 1.1.1
-  identity: null # Your Apple Developer ID
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
-  hardenedRuntime: true
+  bundleVersion: 1.7.0
 
-mas:
-  category: public.app-category.video
-  entitlements: build/entitlements.mas.plist
-  entitlementsInherit: build/entitlements.mas.inherit.plist
-  provisioningProfile: build/embedded.provisionprofile # Required for Store
-
-# Linux Configuration (Flathub / Flatpak)
+# Linux Configuration
 linux:
   target:
     - AppImage
     - deb
-    - flatpak # Essential for Flathub
+    - rpm
+    - snap
   category: AudioVideo;Recorder;Audio;
   icon: assets/icon.png
   maintainer: Ajarn Spencer Littlewood <https://github.com/AjarnSpencer>
   vendor: Ajarn Spencer Littlewood
   homepage: https://www.ajarnspencer.com
 
-flatpak:
-  runtime: org.freedesktop.Platform
-  runtimeVersion: "23.08"
-  sdk: org.freedesktop.Sdk
-  finishArgs:
-    - --share=ipc
-    - --share=network
-    - --socket=x11
-    - --socket=wayland
-    - --socket=pulseaudio # Required for capture/playback
-    - --device=all
-    - --filesystem=xdg-documents:rw
-    - --talk-name=org.freedesktop.Notifications
-
 publish:
   provider: github
   owner: AjarnSpencer
-  repo: Text-2-Speech-Polyglot-Narrator
+  repo: Text-Narrator-Polyglot-Pro
