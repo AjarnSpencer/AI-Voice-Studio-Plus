@@ -66,7 +66,7 @@ If you find this tool useful for your productions, consider supporting the devel
   <a href="https://wise.com/" target="_blank">
     <img src="https://img.shields.io/badge/Donate_with-Wise-9FE870?style=for-the-badge&logo=wise&logoColor=163300" alt="Donate with Wise" />
   </a>
-  <a href="https://stripe.com/" target="_blank">
+  <a href="https://donate.stripe.com/9B68wOcilgL3fFfc7o9AA00" target="_blank">
     <img src="https://img.shields.io/badge/Donate_with-Stripe-626CD9?style=for-the-badge&logo=stripe&logoColor=white" alt="Donate with Stripe" />
   </a>
   <a href="https://www.buymeacoffee.com/" target="_blank">
