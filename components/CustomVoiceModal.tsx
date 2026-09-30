@@ -88,23 +88,45 @@ export const CustomVoiceModal: React.FC<CustomVoiceModalProps> = ({ isOpen, onCl
       await new Promise(r => reader.onload = r);
       const base64Audio = (reader.result as string).split(',')[1];
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-tts-preview',
-        contents: [{ parts: [
-          { inlineData: { mimeType: audioBlob.type, data: base64Audio } },
-          { text: "Analyze the tone, pitch, and prosody of this voice. Provide a JSON object with 'instruction' (detailed description for AI mimicking) and 'baseVoice' (either 'Charon' or 'Kore' as the structural foundation)." }
-        ]}],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              instruction: { type: Type.STRING },
-              baseVoice: { type: Type.STRING }
+      let response: any = null;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-3.6-flash',
+          contents: [{ parts: [
+            { inlineData: { mimeType: audioBlob.type, data: base64Audio } },
+            { text: "Analyze the tone, pitch, and prosody of this voice. Provide a JSON object with 'instruction' (detailed description for AI mimicking) and 'baseVoice' (either 'Charon' or 'Kore' as the structural foundation)." }
+          ]}],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                instruction: { type: Type.STRING },
+                baseVoice: { type: Type.STRING }
+              }
             }
           }
-        }
-      });
+        });
+      } catch (fErr: any) {
+        // Fallback to gemini-3.8-flash
+        response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: [{ parts: [
+            { inlineData: { mimeType: audioBlob.type, data: base64Audio } },
+            { text: "Analyze the tone, pitch, and prosody of this voice. Provide a JSON object with 'instruction' (detailed description for AI mimicking) and 'baseVoice' (either 'Charon' or 'Kore' as the structural foundation)." }
+          ]}],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                instruction: { type: Type.STRING },
+                baseVoice: { type: Type.STRING }
+              }
+            }
+          }
+        });
+      }
       
       const result = response.text;
       if (!result) throw new Error("No response text from model.");

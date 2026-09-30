@@ -6,31 +6,15 @@ import {
   BookOpenIcon, 
   ArrowDownTrayIcon, 
   ArrowUpTrayIcon, 
-  InformationCircleIcon 
+  InformationCircleIcon,
+  GlobeAltIcon
 } from './components/icons';
 import { CustomVoiceModal } from './components/CustomVoiceModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { PronunciationModal, type PronunciationRule } from './components/PronunciationModal';
 import { TutorialModal } from './components/TutorialModal';
 import { decode, pcmToWavBlob, concatenateBuffers } from './utils/audio';
-
-declare global {
-  interface AIStudio {
-    hasSelectedApiKey: () => Promise<boolean>;
-    openSelectKey: () => Promise<void>;
-  }
-
-  interface Window {
-    electronAPI?: {
-      showInFolder: (path: string) => Promise<void>;
-      openExternal: (url: string) => Promise<void>;
-      saveFile: (options: any) => Promise<boolean>;
-      openFile: (options: any) => Promise<string | null>;
-      platform: string;
-    };
-    aistudio?: AIStudio;
-  }
-}
+import './types';
 
 interface CustomVoice {
   id: string;
@@ -113,6 +97,231 @@ Ayaṃ dhammadesanā pītiyā sukhaṃ upasaṅkamantassa yogino bhāvanā-vīth
 Idha pana vitakka-vicārānaṃ vūpasamo sace hoti, cittaṃ ekodhibhāvaṃ pāpuṇāti. Pīti pana saṅkhārakkhandha-pariyāpannā uḷārā, sukhaṃ pana vedanākkhandha-pariyāpannaṃ santaṃ. Tatiye jhāne pītiyā virāgā upekkhako ca viharati, sati-sampajaññena ca sukhaṃ paṭisaṃvedeti. Pītiyo pana bījāni viya, sukhaṃ pana phalaṃ viya. Pīti-khale vūpasante, yogī kevalaṃ santaṃ sukha-rasaṃ anubhavati. Ayam-ettha saṅkhepoti: pīti nāma sampahaṃsana-lakkhaṇā, sukhaṃ nāma anubhavana-lakkhaṇaṃ. Yo pītiṃ vūpasametuṃ sakkoti, so va sukha-sampadaṃ paṭilabhati. Sabbe saṅkhārā aniccā, samādhi-sukhaṃ pana nibbuti-patha-paṭipadaṃ sampādeti.
 </speak>`;
 
+export interface GeminiTtsModelOption {
+  id: string;
+  name: string;
+  badge: string;
+  description: string;
+}
+
+export const GEMINI_TTS_MODELS: GeminiTtsModelOption[] = [
+  { 
+    id: 'gemini-3.1-flash-tts-preview', 
+    name: 'Gemini 3.1 Flash TTS (Preview)', 
+    badge: 'Frontier / Steerable',
+    description: 'Latest high-fidelity frontier model with steerable prosody & neural audio tags.'
+  },
+  { 
+    id: 'gemini-2.5-flash-preview-tts', 
+    name: 'Gemini 2.5 Flash TTS (Preview)', 
+    badge: 'Free Tier / High Speed',
+    description: 'Quota-resilient and high-throughput. Serves as automatic fallback when free tokens are exhausted.'
+  },
+  { 
+    id: 'gemini-2.5-pro-preview-tts', 
+    name: 'Gemini 2.5 Pro TTS (Preview)', 
+    badge: 'Pro Studio Depth',
+    description: 'Deep expressive resonance and acoustic precision for studio-grade long-form productions.'
+  }
+];
+
+export const getCleanLanguageName = (lang: string): string => {
+  return lang.replace(/\s*\([A-Z-]+\)$/, '').trim();
+};
+
+export const isSacredLiturgicalText = (text: string): boolean => {
+  if (!text) return false;
+  // Sāsanika Vivarana Katha title or variant spelling
+  if (/s[āa]sanika[- ]vivarana[- ]katha/i.test(text)) return true;
+  // Characteristic Pali/Sanskrit liturgical chanting phrases and keywords
+  if (/namo\s+tassa|bhagavato|arahato|samm[āa]sambuddh|iti\s+pi\s+so|sv[āa]kkh[āa]to|dhammadesan[āa]|sam[āa]dhi[- ]bh[āa]van[āa]|sa[ṅn]kh[āa]r[āa]|p[īi]tiy[āa]|pa[ṭt]hama[ṃm]|jh[āa]na|upekkhako|sukha[ṃm]|anicc[āa]/i.test(text)) return true;
+  // High density of standard Pali/Sanskrit Romanized diacritics
+  const diacriticMatches = text.match(/[āīūṃṅñṭḍṇḷṛṝḹḥ]/g);
+  return !!(diacriticMatches && diacriticMatches.length >= 4);
+};
+
+export const isSacredRecitation = (voiceKey: string, targetLang: string): boolean => {
+  return voiceKey === 'Sacred Text Reader' || targetLang === 'Sanskrit (SA)' || targetLang === 'Thai Pali (TH-PI)';
+};
+
+export const isAlreadyInLanguage = (text: string, targetLang: string): boolean => {
+  if (!text || !text.trim()) return true;
+  const cleanLang = getCleanLanguageName(targetLang);
+  const isSacred = isSacredLiturgicalText(text);
+
+  // If text is sacred Sanskrit/Pali liturgical text:
+  // It is ONLY already in language if the target language is Sanskrit or Thai Pali.
+  // For all other languages in the dropdown (English, French, German, Spanish, Thai, etc.),
+  // it is NOT in that language and should be translated!
+  if (isSacred) {
+    return targetLang === 'Sanskrit (SA)' || targetLang === 'Thai Pali (TH-PI)';
+  }
+
+  // If general secular text:
+  if (cleanLang === 'English') {
+    const stripped = text.replace(/<[^>]*>/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    // Check if stripped text contains non-Latin scripts (Thai, Devanagari, Japanese, Arabic, Cyrillic, etc.)
+    const hasNonLatin = /[^\u0000-\u007F\u0080-\u00FF\u0100-\u017F\u2000-\u206F]/.test(stripped);
+    return !hasNonLatin;
+  }
+
+  return false;
+};
+
+export const shouldAutoTranslateManuscript = (
+  text: string,
+  targetLang: string,
+  voiceKey: string
+): boolean => {
+  if (!text || !text.trim()) return false;
+
+  // 1. Sanskrit verbatim for sacred recitation:
+  // When using Sacred Text Reader or liturgical Sanskrit/Pali chanting,
+  // NEVER translate. It must remain Sanskrit verbatim.
+  if (isSacredRecitation(voiceKey, targetLang)) {
+    return false;
+  }
+
+  // 2. Otherwise: all other languages in the dropdown should translate to the language chosen!
+  // If the manuscript is not already in that language, auto-translate it.
+  if (isAlreadyInLanguage(text, targetLang)) {
+    return false;
+  }
+
+  return true;
+};
+
+export const translateScript = async (
+  text: string, 
+  targetLang: string, 
+  ai: GoogleGenAI,
+  onStatusUpdate?: (status: string) => void
+): Promise<string> => {
+  const cleanLang = getCleanLanguageName(targetLang);
+  
+  // If text is already in the target language, return as is
+  if (isAlreadyInLanguage(text, targetLang)) {
+    return text;
+  }
+
+  // Liturgical Sanskrit & Thai Pali targets never translate sacred liturgical texts
+  if (isSacredLiturgicalText(text) && (targetLang === 'Sanskrit (SA)' || targetLang === 'Thai Pali (TH-PI)')) {
+    return text;
+  }
+
+  const isDiacriticLang = ['Sanskrit (SA)', 'Thai Pali (TH-PI)'].includes(targetLang);
+
+  const trimmed = text.trim();
+  const hasSpeakTag = trimmed.startsWith('<speak>') && trimmed.endsWith('</speak>');
+  let innerText = trimmed;
+  if (hasSpeakTag) {
+    innerText = trimmed.replace(/^<speak>\s*/i, '').replace(/\s*<\/speak>$/i, '').trim();
+  }
+
+  if (!innerText) return text;
+
+  onStatusUpdate?.(`Translating manuscript into authentic native ${cleanLang}...`);
+
+  const systemInstruction = isDiacriticLang
+    ? `You are an expert scholar of ${cleanLang} literature and sacred liturgical texts.
+Task: Translate any English or foreign text into authentic ${cleanLang} using standard traditional Romanized diacritics (ā, ī, ū, ṃ, ṅ, ñ, ṭ, ḍ, ṇ, ḷ) or traditional liturgical spelling.
+If the text is already written in ${cleanLang}, preserve and optimize its orthography for clear recitation.
+Preserve any SSML tags like <break>, <p>, <s>.
+Return ONLY the translated script text with NO explanations, markdown code blocks, or preamble.`
+    : cleanLang === 'English'
+    ? `You are an expert literary translator specializing in ${targetLang} philosophical, spiritual, and documentary audio narration.
+Task: Translate the input text completely into fluent, eloquent, natural ${targetLang}.
+CRITICAL REQUIREMENTS:
+1. Translate all foreign or sacred text (such as Sanskrit, Pali, Latin, or foreign languages) into clear, eloquent, authentic ${targetLang} suitable for high-production audiobook narration.
+2. If translating Buddhist or liturgical manuscripts (like Sāsanika-Vivarana-Katha), render the doctrinal meaning accurately and beautifully into rich literary English.
+3. If the input is already written in English, return it unchanged.
+4. If there are inline SSML or audio tags like <break time="..."/>, [whispers], [laughs], [slow], [fast], preserve them in place.
+5. Return ONLY the translated manuscript text. Never wrap in markdown code blocks (\`\`\`). Do NOT include conversational filler, notes, or explanations.`
+    : `You are a professional polyglot literary translator specializing in native ${cleanLang} audiobooks and documentary voiceover.
+Task: Translate the narrative text completely into authentic, natural, indigenous ${cleanLang}.
+CRITICAL REQUIREMENTS:
+1. Translate into the authentic native script and alphabet of ${cleanLang} (for example: Thai script ภาษาไทย for Thai, Devanagari for Hindi, Cyrillic for Russian, Japanese Kanji/Kana for Japanese, Hangul for Korean, Arabic script for Arabic, native Latin script for German, French, Spanish, Italian, etc.).
+2. Translate ALL foreign sentences into authentic ${cleanLang}. Do NOT leave untranslated foreign words. Do NOT provide Latin phonetic approximations when translating to non-Latin scripts.
+3. If the input is already written in native ${cleanLang}, return it unchanged.
+4. If there are inline SSML or audio tags like <break time="..."/>, [whispers], [laughs], [slow], [fast], preserve them in place.
+5. Return ONLY the translated manuscript text. Never wrap in markdown code blocks (\`\`\`). Do NOT include conversational filler, notes, or explanations.`;
+
+  // Break text into paragraphs or groups of paragraphs to translate seamlessly
+  const rawParagraphs = innerText.split(/\n+/).map(p => p.trim()).filter(Boolean);
+  const paragraphBatches: string[] = [];
+  let currentBatch = '';
+  for (const p of rawParagraphs) {
+    if (currentBatch.length + p.length > 900 && currentBatch.length > 0) {
+      paragraphBatches.push(currentBatch.trim());
+      currentBatch = p;
+    } else {
+      currentBatch = currentBatch ? `${currentBatch}\n\n${p}` : p;
+    }
+  }
+  if (currentBatch.trim()) {
+    paragraphBatches.push(currentBatch.trim());
+  }
+
+  const translatedBatches: string[] = [];
+  const candidateModels = ['gemini-3.6-flash', 'gemini-3.8-flash'];
+
+  for (let pIdx = 0; pIdx < paragraphBatches.length; pIdx++) {
+    const batch = paragraphBatches[pIdx];
+    onStatusUpdate?.(`Translating to ${cleanLang} (${pIdx + 1}/${paragraphBatches.length})...`);
+
+    let translatedPara = '';
+    let lastError: any = null;
+
+    for (const modelName of candidateModels) {
+      let attempts = 0;
+      const maxAttempts = 2;
+
+      while (attempts < maxAttempts && !translatedPara) {
+        try {
+          const transRes = await Promise.race([
+            ai.models.generateContent({
+              model: modelName,
+              contents: [{ parts: [{ text: `${systemInstruction}\n\nManuscript to translate:\n${batch}` }] }]
+            }),
+            new Promise<any>((_, reject) => setTimeout(() => reject(new Error("Translation Timeout (35s)")), 35000))
+          ]);
+
+          if (transRes?.text) {
+            let clean = transRes.text.trim();
+            clean = clean.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+            translatedPara = clean;
+            break;
+          }
+        } catch (err: any) {
+          attempts++;
+          lastError = err;
+          const isNotFound = err?.status === 404 || err?.message?.includes('404') || err?.message?.includes('NOT_FOUND');
+          if (isNotFound) {
+            // Immediately try next model in candidateModels
+            break;
+          }
+          const isQuota = err?.message?.includes('RESOURCE_EXHAUSTED') || err?.message?.includes('429') || err?.status === 429;
+          if (isQuota) {
+            onStatusUpdate?.(`Rate limit on ${modelName}. Backing off...`);
+            await new Promise(r => setTimeout(r, 1500 * attempts));
+          }
+        }
+      }
+
+      if (translatedPara) break;
+    }
+
+    if (!translatedPara && lastError) {
+      throw new Error(`Failed to translate section ${pIdx + 1} to ${cleanLang}: ${lastError?.message || 'Translation error'}`);
+    }
+
+    translatedBatches.push(translatedPara || batch);
+  }
+
+  const fullTranslated = translatedBatches.join('\n\n');
+  return hasSpeakTag ? `<speak>\n${fullTranslated}\n</speak>` : fullTranslated;
+};
+
 const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedVoiceKey, setSelectedVoiceKey] = useState<string>('Sacred Text Reader');
@@ -120,6 +329,7 @@ const App: React.FC = () => {
   const [isCustomVoiceModalOpen, setIsCustomVoiceModalOpen] = useState(false);
   
   const [narrationProvider, setNarrationProvider] = useState<SvgProvider>('gemini-tts');
+  const [geminiModel, setGeminiModel] = useState<string>('gemini-3.1-flash-tts-preview');
   const [voiceStyle, setVoiceStyle] = useState<string>('');
   
   const [geminiApiKey, setGeminiApiKey] = useState<string>('');
@@ -134,6 +344,8 @@ const App: React.FC = () => {
   const [narrationText, setNarrationText] = useState<string>(MASTER_NARRATION_DEMO);
   const [narrationLanguage, setNarrationLanguage] = useState<string>('English (US)');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [isTranslating, setIsTranslating] = useState<boolean>(false);
+  const [translationNotice, setTranslationNotice] = useState<string | null>(null);
   const [generationStatus, setGenerationStatus] = useState<string>('');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [pronunciationRules, setPronunciationRules] = useState<PronunciationRule[]>([]);
@@ -151,8 +363,62 @@ const App: React.FC = () => {
       setResembleKey(localStorage.getItem('resemble_api_key') || '');
       setResembleProjectId(localStorage.getItem('resemble_project_id') || '');
       setElevenLabsKey(localStorage.getItem('elevenlabs_api_key') || '');
+      const storedModel = localStorage.getItem('gemini_tts_model');
+      if (storedModel && GEMINI_TTS_MODELS.some(m => m.id === storedModel)) {
+        setGeminiModel(storedModel);
+      }
     }
   }, []);
+
+  const handleGeminiModelChange = (modelId: string) => {
+    setGeminiModel(modelId);
+    if (!isAmnesiac) {
+      localStorage.setItem('gemini_tts_model', modelId);
+    }
+  };
+
+  const handleManualTranslate = async () => {
+    if (!narrationText.trim()) return;
+
+    if (selectedVoiceKey === 'Sacred Text Reader') {
+      setTranslationNotice("ℹ Sacred Text Reader recites original sacred Sanskrit/Pali liturgical manuscripts verbatim without translation.");
+      setTimeout(() => setTranslationNotice(null), 6000);
+      return;
+    }
+
+    if (narrationLanguage === 'Sanskrit (SA)' || narrationLanguage === 'Thai Pali (TH-PI)') {
+      if (isSacredLiturgicalText(narrationText)) {
+        setTranslationNotice("ℹ Sacred liturgical manuscript is already in original Sanskrit/Pali for sacred recitation.");
+        setTimeout(() => setTranslationNotice(null), 6000);
+        return;
+      }
+    }
+
+    if (!await ensureApiKey()) return;
+
+    setError(null);
+    setIsTranslating(true);
+    const cleanLang = getCleanLanguageName(narrationLanguage);
+    setTranslationNotice(`Translating manuscript into authentic native ${cleanLang}...`);
+
+    try {
+      const apiKey = getEffectiveApiKey();
+      if (!apiKey) throw new Error("API key required for translation.");
+      const ai = new GoogleGenAI({ apiKey });
+      const translated = await translateScript(narrationText, narrationLanguage, ai, (msg) => setTranslationNotice(msg));
+      if (translated && translated.trim().length > 0) {
+        setNarrationText(translated);
+        setTranslationNotice(`✓ Successfully translated manuscript into ${cleanLang}! Ready for native synthesis.`);
+        setTimeout(() => setTranslationNotice(null), 6000);
+      }
+    } catch (err: any) {
+      console.error("Manual translation error:", err);
+      setError(`Translation Error: ${err.message || 'Failed to translate manuscript.'}`);
+      setTranslationNotice(null);
+    } finally {
+      setIsTranslating(false);
+    }
+  };
 
   const handleExport = async (content: string, filename: string, type: string) => {
     if (window.electronAPI?.saveFile) {
@@ -316,6 +582,25 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey });
       console.log("GoogleGenAI initialized");
       let script = narrationText;
+      const cleanLang = getCleanLanguageName(narrationLanguage);
+      const isPaliOrSanskrit = ['Sanskrit (SA)', 'Thai Pali (TH-PI)'].includes(narrationLanguage);
+
+      // Perform script-level translation only for appropriate texts (never Sacred Text Reader or sacred texts in English)
+      const autoTranslate = shouldAutoTranslateManuscript(script, narrationLanguage, selectedVoiceKey);
+      if (autoTranslate) {
+        setGenerationStatus(`Translating manuscript into authentic native ${cleanLang}...`);
+        try {
+          const translated = await translateScript(script, narrationLanguage, ai, (msg) => setGenerationStatus(msg));
+          if (translated && translated.trim().length > 0) {
+            script = translated;
+            setNarrationText(translated); // Reflect translated script in editor so user sees authentic native script
+          }
+        } catch (transErr: any) {
+          console.error("Translation stage error:", transErr);
+          throw new Error(`Translation to ${cleanLang} failed: ${transErr.message}. The synthesis was halted to prevent pronouncing foreign text with an incorrect accent.`);
+        }
+      }
+
       pronunciationRules.forEach(r => script = script.replace(new RegExp(`\\b${r.word}\\b`, 'gi'), r.alias));
 
       const isSsmlInput = script.includes('<speak>');
@@ -323,42 +608,8 @@ const App: React.FC = () => {
       const audioParts: Uint8Array[] = [];
 
       for (let i = 0; i < chunks.length; i++) {
-        setGenerationStatus(`Segment ${i + 1}/${chunks.length}...`);
+        setGenerationStatus(`Synthesizing Segment ${i + 1}/${chunks.length} in ${cleanLang}...`);
         let chunk = chunks[i];
-
-        const isDiacriticLanguage = ['Sanskrit (SA)', 'Thai Pali (TH-PI)'].includes(narrationLanguage);
-
-        if (narrationLanguage !== 'English (US)') {
-             setGenerationStatus(`Translating Segment ${i + 1} to ${narrationLanguage}...`);
-             const promptText = isDiacriticLanguage
-                ? `Orthographic Optimization: Preserve the following ${narrationLanguage} text exactly, but optimize its Romanized diacritics for phonetic clarity when read by a Brahmanic/Vedic AI narrator. Return ONLY the script.\n\nScript:\n${chunk}`
-                : `Translate the following script/narration into ${narrationLanguage}. Translate ALL English or foreign text (including text inside <speak> or SSML tags) into natural, written ${narrationLanguage} script. Preserve any SSML/XML tags like <speak>, <break>, <p>, <s> around the translated text. Do NOT leave text in English. Return ONLY the translated script in ${narrationLanguage}.\n\nScript:\n${chunk}`;
-
-             try {
-                let transAttempts = 0;
-                let translatedText = '';
-                while (transAttempts < 3 && !translatedText) {
-                    try {
-                        const transRes = await Promise.race([
-                            ai.models.generateContent({ 
-                                model: 'gemini-2.5-flash',
-                                contents: [{ parts: [{ text: promptText }] }] 
-                            }),
-                            new Promise<any>((_, reject) => setTimeout(() => reject(new Error("Translation API Timeout")), 30000))
-                        ]);
-                        if (transRes.text) translatedText = transRes.text.trim();
-                    } catch (tErr: any) {
-                        transAttempts++;
-                        if (tErr?.message?.includes('RESOURCE_EXHAUSTED') || tErr?.message?.includes('429')) {
-                            await new Promise(r => setTimeout(r, 2000 * transAttempts));
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if (translatedText) chunk = translatedText;
-             } catch (tErr) { console.warn("Translation optimization failed", tErr); }
-        }
 
         if (isSsmlInput) {
             if (!chunk.trim().startsWith('<speak>')) chunk = '<speak>' + chunk;
@@ -370,10 +621,30 @@ const App: React.FC = () => {
           const preset = narrationPrebuiltVoices[selectedVoiceKey];
           const baseVoice = customProfile ? customProfile.baseVoice : (preset?.voiceName || 'Charon');
           
+          let voiceInstruction = customProfile ? customProfile.instruction : (preset?.instruction || "");
+          const isSacred = isSacredLiturgicalText(chunk);
+
+          let accentInstruction = '';
+          if (selectedVoiceKey === 'Sacred Text Reader') {
+            // Sacred recitation: Always retain authentic Vedic/Brahmanic baritone chanting in Sanskrit/Pali verbatim
+            voiceInstruction = preset?.instruction || 'Use an Unambiguously MALE Indian Hindu Male baritone voice with perfect pronunciation of Pali and Sanskrit and Romanized diacritics, and Hindu Mantras.';
+            accentInstruction = 'Precise Vedic/Brahmanic chanting and authentic Pali/Sanskrit recitation of Romanized diacritics';
+          } else if (isPaliOrSanskrit) {
+            accentInstruction = 'Precise Vedic/Brahmanic chanting and authentic Pali/Sanskrit pronunciation';
+          } else if (narrationLanguage === 'English (UK)') {
+            accentInstruction = 'Authentic British / UK English speaker with natural accent and clear pronunciation';
+          } else if (narrationLanguage === 'English (US)') {
+            accentInstruction = 'Authentic American English speaker with natural accent and clear pronunciation';
+          } else if (cleanLang === 'English') {
+            accentInstruction = 'Authentic English speaker with natural accent and clear pronunciation';
+          } else {
+            accentInstruction = `Native ${cleanLang} speaker with authentic local accent and correct indigenous pronunciation`;
+          }
+
           const instructions = [
-              narrationLanguage !== 'English (US)' ? `Fluent native ${narrationLanguage} pronunciation` : '',
+              accentInstruction,
               voiceStyle ? `${voiceStyle} tone` : '',
-              customProfile ? customProfile.instruction : (preset?.instruction || "")
+              voiceInstruction
           ].filter(Boolean).join(", ");
 
           if (narrationProvider === 'elevenlabs') {
@@ -402,15 +673,22 @@ const App: React.FC = () => {
           } else {
             const ttsPrompt = instructions ? `Phonetic Directive: ${instructions}\n\nNarrative Text:\n${chunk}\n\n(Note: You support granular neural control tags like [whispers], [laughs], [slow], [fast], [excited]. Embed them directly in the text to modulate delivery.)` : chunk;
 
+            const selectedModel = geminiModel || 'gemini-3.1-flash-tts-preview';
+            const fallbackModel = selectedModel === 'gemini-2.5-flash-preview-tts' 
+              ? 'gemini-3.1-flash-tts-preview' 
+              : 'gemini-2.5-flash-preview-tts';
+
+            let activeModel = selectedModel;
             let res: any;
             let attempts = 0;
             const maxAttempts = 3;
+            let fellBackToSecondary = false;
             
             while (attempts < maxAttempts) {
               try {
                 res = await Promise.race([
                     ai.models.generateContent({
-                        model: 'gemini-3.1-flash-tts-preview',
+                        model: activeModel,
                         contents: [{ parts: [{ text: ttsPrompt }] }],
                         config: {
                             responseModalities: [Modality.AUDIO], 
@@ -429,24 +707,38 @@ const App: React.FC = () => {
                 break;
               } catch (ttsErr: any) {
                 attempts++;
-                const isRateLimit = ttsErr?.message?.includes('RESOURCE_EXHAUSTED') || ttsErr?.message?.includes('429') || ttsErr?.status === 429;
+                const isRateLimit = ttsErr?.message?.includes('RESOURCE_EXHAUSTED') || 
+                                    ttsErr?.message?.includes('429') || 
+                                    ttsErr?.status === 429 ||
+                                    ttsErr?.message?.includes('quota');
+                
+                // Automatic fallback for free users when tokens or rate limits are exhausted
+                if (isRateLimit && !fellBackToSecondary && fallbackModel) {
+                    fellBackToSecondary = true;
+                    activeModel = fallbackModel;
+                    attempts = 0;
+                    setGenerationStatus(`Segment ${i + 1}: Free Quota Exhausted on ${selectedModel} -> Auto-fallback to ${fallbackModel}...`);
+                    await new Promise(r => setTimeout(r, 1500));
+                    continue;
+                }
+
                 if (attempts >= maxAttempts) {
                     if (isRateLimit) {
-                        throw new Error(`API Rate Limit / Quota Exhausted on segment ${i + 1}. If using a free tier key, please wait a minute or switch to a paid API key in settings.`);
+                        throw new Error(`API Rate Limit / Free Quota Exhausted on segment ${i + 1} (Tried: ${activeModel}). If using a free tier key, please wait a moment or switch to Gemini 2.5 Flash TTS / Paid API key in settings.`);
                     }
                     throw ttsErr;
                 }
                 const backoffMs = isRateLimit ? 5000 * attempts : 2500;
-                setGenerationStatus(`Segment ${i + 1} Recovery (${attempts}/${maxAttempts}) ${isRateLimit ? '[Rate Limit - Backing Off]' : ''}...`);
+                setGenerationStatus(`Segment ${i + 1} Recovery (${attempts}/${maxAttempts}) ${isRateLimit ? `[Rate Limit on ${activeModel} - Backing Off]` : ''}...`);
                 await new Promise(r => setTimeout(r, backoffMs));
               }
             }
 
             if (res.candidates?.[0]?.finishReason === 'SAFETY') {
-                setGenerationStatus(`Segment ${i + 1}: Safety Fallback...`);
+                setGenerationStatus(`Segment ${i + 1}: Safety Fallback (${activeModel})...`);
                 const stripped = chunk.replace(/<[^>]*>/g, '');
                 const resRetry = await ai.models.generateContent({
-                    model: 'gemini-3.1-flash-tts-preview',
+                    model: activeModel,
                     contents: [{ parts: [{ text: `Directive: Narrate this text clearly.\n\nText:\n${stripped}` }] }],
                     config: {
                         responseModalities: [Modality.AUDIO],
@@ -461,10 +753,10 @@ const App: React.FC = () => {
                 
                 // Emergency Clean Pass if no audio returned
                 if (!base64) {
-                    setGenerationStatus(`Segment ${i + 1}: Neural Recovery Pass...`);
+                    setGenerationStatus(`Segment ${i + 1}: Neural Recovery Pass (${activeModel})...`);
                     const cleanText = chunk.replace(/<[^>]*>/g, '');
                     const resClean = await ai.models.generateContent({
-                        model: 'gemini-3.1-flash-tts-preview',
+                        model: activeModel,
                         contents: [{ parts: [{ text: cleanText }] }],
                         config: {
                             responseModalities: [Modality.AUDIO],
@@ -474,13 +766,13 @@ const App: React.FC = () => {
                     base64 = resClean.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data;
 
                     if (!base64) {
-                        setGenerationStatus(`Segment ${i + 1}: Orthographic Normalization...`);
+                        setGenerationStatus(`Segment ${i + 1}: Orthographic Normalization (${activeModel})...`);
                         const normalizedText = cleanText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[āīūṃṅñṭḍṇḷ]/g, (m) => {
                             const map: any = { 'ā': 'a', 'ī': 'i', 'ū': 'u', 'ṃ': 'm', 'ṅ': 'n', 'ñ': 'n', 'ṭ': 't', 'ḍ': 'd', 'ṇ': 'n', 'ḷ': 'l' };
                             return map[m] || m;
                         });
                         const resNorm = await ai.models.generateContent({
-                            model: 'gemini-3.1-flash-tts-preview',
+                            model: activeModel,
                             contents: [{ parts: [{ text: normalizedText }] }],
                             config: {
                                 responseModalities: [Modality.AUDIO],
@@ -494,13 +786,13 @@ const App: React.FC = () => {
                         setGenerationStatus(`Segment ${i + 1}: Neural Phoneticization...`);
                         try {
                             const phonRes = await ai.models.generateContent({
-                                model: 'gemini-2.5-flash',
+                                model: 'gemini-3.6-flash',
                                 contents: [{ parts: [{ text: `Phonetic Transliteration: Convert the following text into a phonetic spelling that is easy for a standard English TTS engine to read correctly. Use hyphens for syllables if needed. Return ONLY the phonetic text.\n\nText:\n${chunk.replace(/<[^>]*>/g, '')}` }] }]
                             });
                             const phonText = phonRes.text;
                             if (phonText) {
                                 const resPhon = await ai.models.generateContent({
-                                    model: 'gemini-3.1-flash-tts-preview',
+                                    model: activeModel,
                                     contents: [{ parts: [{ text: phonText.trim() }] }],
                                     config: {
                                         responseModalities: [Modality.AUDIO],
@@ -513,10 +805,10 @@ const App: React.FC = () => {
                     }
 
                     if (!base64) {
-                        setGenerationStatus(`Segment ${i + 1}: Voice Foundation Swap...`);
+                        setGenerationStatus(`Segment ${i + 1}: Voice Foundation Swap (${activeModel})...`);
                         const fallbackVoice = baseVoice === 'Charon' ? 'Fenrir' : 'Charon';
                         const resSwap = await ai.models.generateContent({
-                            model: 'gemini-3.1-flash-tts-preview',
+                            model: activeModel,
                             contents: [{ parts: [{ text: chunk.replace(/<[^>]*>/g, '') }] }],
                             config: {
                                 responseModalities: [Modality.AUDIO],
@@ -533,7 +825,7 @@ const App: React.FC = () => {
                     const textPart = res.candidates?.[0]?.content?.parts?.find((p: any) => p.text)?.text;
                     const finishReason = res.candidates?.[0]?.finishReason;
                     if (textPart) throw new Error(`Segment ${i+1} returned text instead of audio. Reason: ${finishReason}. Response: ${textPart.substring(0, 100)}...`);
-                    throw new Error(`Segment ${i+1} failed to generate audio (Reason: ${finishReason}). This can happen with complex diacritics or unrecognized scripts in the current voice profile. Try simplifying the text or changing the voice.`);
+                    throw new Error(`Segment ${i+1} failed to generate audio (Reason: ${finishReason}, Model: ${activeModel}). This can happen with complex diacritics or unrecognized scripts in the current voice profile. Try simplifying the text or changing the voice.`);
                 }
             }
           }
@@ -633,18 +925,57 @@ const App: React.FC = () => {
               <div>
                   <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Pipeline Engine</label>
                   <select value={narrationProvider} onChange={(e) => setNarrationProvider(e.target.value as SvgProvider)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
-                    <option value="gemini-tts">Gemini Neural TTS (v3.1 Preview)</option>
+                    <option value="gemini-tts">Gemini Neural TTS</option>
                     <option value="elevenlabs">ElevenLabs Studio</option>
                     <option value="resemble">Resemble AI</option>
                   </select>
               </div>
-              <div>
-                  <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest">Language Registry</label>
-                  <select value={narrationLanguage} onChange={(e) => setNarrationLanguage(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none">
+
+              {narrationProvider === 'gemini-tts' ? (
+                <div>
+                    <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest flex items-center justify-between">
+                      <span>Gemini TTS Model</span>
+                      <span className="text-[8px] text-teal-400 font-mono lowercase">auto-fallback</span>
+                    </label>
+                    <select 
+                      value={geminiModel} 
+                      onChange={(e) => handleGeminiModelChange(e.target.value)} 
+                      className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none focus:border-teal-500/50 transition-colors"
+                      title={GEMINI_TTS_MODELS.find(m => m.id === geminiModel)?.description}
+                    >
+                      {GEMINI_TTS_MODELS.map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.name} [{m.badge}]
+                        </option>
+                      ))}
+                    </select>
+                </div>
+              ) : null}
+
+              <div className={narrationProvider === 'gemini-tts' ? '' : 'md:col-span-1'}>
+                  <label className="block text-[9px] font-black text-gray-500 mb-1 uppercase tracking-widest flex items-center justify-between">
+                    <span>Language Registry</span>
+                    {shouldAutoTranslateManuscript(narrationText, narrationLanguage, selectedVoiceKey) ? (
+                      <span className="text-[8px] text-teal-400 font-mono lowercase">auto-translates</span>
+                    ) : selectedVoiceKey === 'Sacred Text Reader' ? (
+                      <span className="text-[8px] text-amber-400 font-mono lowercase">sacred recitation (sanskrit verbatim)</span>
+                    ) : (narrationLanguage === 'Sanskrit (SA)' || narrationLanguage === 'Thai Pali (TH-PI)') ? (
+                      <span className="text-[8px] text-amber-400 font-mono lowercase">sanskrit verbatim</span>
+                    ) : null}
+                  </label>
+                  <select 
+                    value={narrationLanguage} 
+                    onChange={(e) => {
+                      setNarrationLanguage(e.target.value);
+                      setTranslationNotice(null);
+                    }} 
+                    className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white text-xs outline-none focus:border-teal-500/50 transition-colors"
+                  >
                       {LANGUAGES.map(lang => <option key={lang} value={lang}>{lang}</option>)}
                   </select>
               </div>
-              <div className="md:col-span-2">
+
+              <div className={narrationProvider === 'gemini-tts' ? 'md:col-span-1' : 'md:col-span-2'}>
                 {renderGeminiVoiceSelector()}
               </div>
           </div>
@@ -663,14 +994,55 @@ const App: React.FC = () => {
 
           {/* Narrative Script Area */}
           <div className="flex flex-col flex-grow min-h-[300px]">
-               <div className="flex justify-between items-center mb-2">
-                  <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Narrative Manuscript (Prosody Stack Active)</label>
-                  <div className="flex gap-3">
+               <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
+                  <div className="flex items-center gap-2">
+                     <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Narrative Manuscript (Prosody Stack Active)</label>
+                     {shouldAutoTranslateManuscript(narrationText, narrationLanguage, selectedVoiceKey) ? (
+                       <span className="text-[8px] px-2 py-0.5 rounded-full bg-teal-500/10 text-teal-300 border border-teal-500/20 font-mono flex items-center gap-1">
+                         <GlobeAltIcon className="w-2.5 h-2.5" />
+                         Translates to {getCleanLanguageName(narrationLanguage)}
+                       </span>
+                     ) : selectedVoiceKey === 'Sacred Text Reader' ? (
+                       <span className="text-[8px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono flex items-center gap-1">
+                         Sacred Recitation (Sanskrit Verbatim)
+                       </span>
+                     ) : (narrationLanguage === 'Sanskrit (SA)' || narrationLanguage === 'Thai Pali (TH-PI)') ? (
+                       <span className="text-[8px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono flex items-center gap-1">
+                         Liturgical Chanting (Verbatim)
+                       </span>
+                     ) : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                     {shouldAutoTranslateManuscript(narrationText, narrationLanguage, selectedVoiceKey) && (
+                       <button 
+                         onClick={handleManualTranslate} 
+                         disabled={isTranslating || isGenerating || !narrationText.trim()} 
+                         className="text-[8px] px-2.5 py-1 rounded bg-teal-600/20 hover:bg-teal-600/40 text-teal-300 border border-teal-500/40 font-black uppercase tracking-wider flex items-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                         title={`Translate manuscript into authentic native ${getCleanLanguageName(narrationLanguage)} before synthesizing`}
+                       >
+                         <SparklesIcon className={`w-3 h-3 text-teal-400 ${isTranslating ? 'animate-spin' : ''}`} />
+                         {isTranslating ? 'Translating...' : `Translate to ${getCleanLanguageName(narrationLanguage)}`}
+                       </button>
+                     )}
                      <button onClick={exportScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowDownTrayIcon className="w-3 h-3" /> Export Script</button>
                      <button onClick={importScript} className="text-[8px] text-gray-500 hover:text-teal-400 font-black uppercase flex items-center gap-1 transition-colors"><ArrowUpTrayIcon className="w-3 h-3" /> Import Script</button>
                   </div>
                </div>
-               <textarea value={narrationText} onChange={(e) => setNarrationText(e.target.value)} className="w-full min-h-[300px] bg-gray-800 border border-gray-700 rounded-3xl p-6 text-white font-mono text-xs leading-relaxed shadow-2xl outline-none resize-y focus:border-teal-500/50 transition-all" disabled={isGenerating} />
+
+               {translationNotice && (
+                 <div className="mb-2 p-2.5 rounded-xl bg-teal-950/60 border border-teal-500/30 text-teal-300 text-[11px] font-mono flex items-center gap-2 animate-in fade-in">
+                    <SparklesIcon className="w-4 h-4 text-teal-400 shrink-0 animate-pulse" />
+                    <span>{translationNotice}</span>
+                 </div>
+               )}
+
+               <textarea 
+                 value={narrationText} 
+                 onChange={(e) => setNarrationText(e.target.value)} 
+                 className="w-full min-h-[300px] bg-gray-800 border border-gray-700 rounded-3xl p-6 text-white font-mono text-xs leading-relaxed shadow-2xl outline-none resize-y focus:border-teal-500/50 transition-all" 
+                 disabled={isGenerating || isTranslating} 
+                 placeholder="Type or paste your narrative manuscript here (SSML <speak> tags and neural direction tags supported)..."
+               />
           </div>
           
           {/* Action Trigger */}
